@@ -119,23 +119,52 @@ class DenseCityscapesDataset(Dataset):
         """
         Initialize thedence Cityscapes dataset by loading the image paths
         """
+        
+        
+        """
+        Initialize the Dense Cityscapes dataset
+        Args:
+            dataset_path: root path to DenseCityscapesDataset
+            
+            transform: transforms to apply
+        """
+        
+        
+        
         self.dataset_path = dataset_path
         self.transform = transform
+        
         
         # Constants for depth calculation (from assignment section 4.1)
         self.baseline = 0.222384 # B
         self.focal_length = 2273.82 # f
         
-        # Load all sample file paths
-        self.samples = []
-        raise NotImplementedError('DenseCityscapesDataset.__init__')
+         # Paths to each modality
+        self.image_dir = os.path.join(dataset_path, 'image')
+        self.label_dir = os.path.join(dataset_path, 'label')
+        self.depth_dir = os.path.join(dataset_path, 'depth')  # This contains disparity
+        
+         # Get all image files (they should have corresponding label and depth files)
+        self.image_files = sorted(glob(os.path.join(self.image_dir, '*.npy')))
+        self.label_files = sorted(glob(os.path.join(self.label_dir, '*.npy')))
+        self.depth_files = sorted(glob(os.path.join(self.depth_dir, '*.npy')))
+        
+        # Verify we have the same number of files
+        assert len(self.image_files) == len(self.label_files) == len(self.depth_files), \
+            f"Number of files mismatch: images={len(self.image_files)}, labels={len(self.label_files)}, depths={len(self.depth_files)}"
+        
+        print(f"✅ Loaded {len(self.image_files)} samples from {dataset_path}")
+
+        #raise NotImplementedError('DenseCityscapesDataset.__init__')
 
     def __len__(self):
 
         """
         Your code here
         """
-        raise NotImplementedError('DenseCityscapesDataset.__len__')
+        # Return total number of samples
+        return len(self.image_files)
+        #raise NotImplementedError('DenseCityscapesDataset.__len__')
 
     def __getitem__(self, idx):
 
@@ -143,27 +172,132 @@ class DenseCityscapesDataset(Dataset):
         Hint: generate samples for training
         Hint: return image, semantic_GT, and depth_GT
         """
-        raise NotImplementedError('DenseCityscapesDataset.__getitem__')
+        
+        # Load numpy files
+        image_np = np.load(self.image_files[idx])
+        semantic_np = np.load(self.label_files[idx])
+        disparity_np = np.load(self.depth_files[idx])
+        
+        # Handle invalid labels: convert -1 to 255 (ignore_index for CrossEntropyLoss)
+        semantic_np = semantic_np.copy()  # Make a copy to avoid modifying original
+        semantic_np[semantic_np == -1] = 255
+        
+        # Handle disparity conversion as per instructions
+        # disparity_np shape might be (H, W, 1), take first channel if needed
+        if len(disparity_np.shape) == 3:
+            disparity = disparity_np[:, :, 0]
+        else:
+            disparity = disparity_np
+            
+        # Convert disparity as per CityScape formula
+        # (float(p)-1.) / 256, and we have *65535 because of .npy format
+        disparity = (disparity * 65535 - 1) / 256
+        
+        # Calculate depth: depth = (B * f) / disparity
+        # Avoid division by zero (invalid disparity values)
+        valid_mask = disparity > 0
+        depth = np.zeros_like(disparity, dtype=np.float32)
+        depth[valid_mask] = (self.baseline * self.focal_length) / disparity[valid_mask]
+        
+        # Handle image conversion
+        # Image is likely in [0, 1] range, convert to uint8 for PIL
+        if image_np.max() <= 1.0:
+            image_np = (image_np * 255).astype(np.uint8)
+        
+        # Ensure image is in HWC format for PIL
+        if image_np.shape[0] == 3:  # CHW format
+            image_np = np.transpose(image_np, (1, 2, 0))
+        
+        # Convert to PIL Image
+        image_pil = Image.fromarray(image_np)
+        
+        # Convert semantic mask to PIL Image for processing with transforms
+        # Values: 0-18 are valid classes, 255 is ignore_index
+        semantic_pil = Image.fromarray(semantic_np.astype(np.uint8), mode='L')
+        
+        # Convert depth to PIL Image for processing with transforms
+        # Normalize depth to [0, 255] range for PIL
+        depth_min, depth_max = depth.min(), depth.max()
+        if depth_max > depth_min and not np.isnan(depth_max):
+            depth_normalized = ((depth - depth_min) / (depth_max - depth_min) * 255).astype(np.uint8)
+        else:
+            depth_normalized = depth.astype(np.uint8)
+        depth_pil = Image.fromarray(depth_normalized, mode='L')
+        
+        # Apply transforms (which handle image, semantic, depth together as PIL Images)
+        if self.transform:
+            image_tensor, semantic_tensor, depth_tensor = self.transform(image_pil, semantic_pil, depth_pil)
+        else:
+            # Fallback to basic transforms
+            from torchvision import transforms
+            to_tensor = transforms.ToTensor()
+            image_tensor = to_tensor(image_pil)
+            semantic_tensor = torch.from_numpy(semantic_np).long()
+            depth_tensor = torch.from_numpy(depth).float()
+        
+        return image_tensor, semantic_tensor, depth_tensor
+
+        #raise NotImplementedError('DenseCityscapesDataset.__getitem__')
     
 
 class DenseKITTIDataset(Dataset):
-    def __init__(self, dataset_path, transform=dense_transforms.ToTensor()):
+    """
+    Dataset for KITTI test samples (cross-dataset evaluation)
+    Files are PNG images directly in the folder
+    """
+    def __init__(self, dataset_path, transform=dense_transforms.ToTensor3()):
         """
-        Your code here
+        Initialize KITTI dataset
+        
+        Args:
+            dataset_path: path to folder containing KITTI test PNGs
+            transform: transforms to apply
         """
-        raise NotImplementedError('DenseKITTIDataset.__init__')
+        self.dataset_path = dataset_path
+        self.transform = transform
+        
+        # Get all PNG files in the directory
+        self.image_files = sorted(glob(os.path.join(dataset_path, '*.png')))
+        
+        if len(self.image_files) == 0:
+            # Try other extensions if no PNGs found
+            self.image_files = sorted(glob(os.path.join(dataset_path, '*.jpg')))
+        
+        if len(self.image_files) == 0:
+            raise ValueError(f"No image files found in {dataset_path}")
+        
+        print(f"✅ Loaded {len(self.image_files)} KITTI test samples (PNG format)")
 
     def __len__(self):
-        """
-        Your code here
-        """
-        raise NotImplementedError('DenseKITTIDataset.__len__')
+        return len(self.image_files)
 
     def __getitem__(self, idx):
         """
-        Your code here
+        Load and return (image, dummy_semantic, dummy_depth)
+        For KITTI cross-dataset evaluation, we only need images
         """
-        raise NotImplementedError('DenseKITTIDataset.__getitem__')
+        # Load PNG image
+        image_path = self.image_files[idx]
+        image_pil = Image.open(image_path).convert('RGB')
+        
+        # Get image dimensions for dummy tensors
+        W, H = image_pil.size
+        
+        # Create dummy semantic (all zeros) and depth (all zeros)
+        dummy_semantic = Image.fromarray(np.zeros((H, W), dtype=np.uint8))
+        dummy_depth = np.zeros((H, W), dtype=np.float32)
+        
+        # Apply transforms
+        if self.transform:
+            image_tensor, semantic_tensor, depth_tensor = self.transform(image_pil, dummy_semantic, dummy_depth)
+        else:
+            from torchvision import transforms
+            to_tensor = transforms.ToTensor()
+            image_tensor = to_tensor(image_pil)
+            semantic_tensor = torch.from_numpy(np.array(dummy_semantic)).long()
+            depth_tensor = torch.from_numpy(dummy_depth).float()
+        
+        return image_tensor, semantic_tensor, depth_tensor
 
 
 class DenseVisualization():
@@ -185,14 +319,43 @@ def load_data(dataset_path, num_workers=0, batch_size=128, **kwargs):
     return DataLoader(dataset, num_workers=num_workers, batch_size=batch_size, shuffle=True, drop_last=True)
 
 
-def load_dense_data(dataset_path, num_workers=0, batch_size=32, **kwargs):
-    dataset = DenseCityscapesDataset(dataset_path, **kwargs)
-    return DataLoader(dataset, num_workers=num_workers, batch_size=batch_size, shuffle=True, drop_last=True)
+def load_dense_data(dataset_path, num_workers=0, batch_size=32, shuffle=True, drop_last=True, transform=None, **kwargs):
+    """
+    Load dense data from a folder containing 'image', 'label', 'depth' subfolders
+    """
+    print(f"load_dense_data received transform: {transform}")
+    print(f"transform type: {type(transform)}")
+    
+    if transform is None:
+        transform = dense_transforms.ToTensor()
+        print(f"Using default transform: {transform}")
+    
+    dataset = DenseCityscapesDataset(dataset_path, transform=transform, **kwargs)
+    print(f"Dataset created with transform: {dataset.transform}")
+    
+    return DataLoader(dataset, 
+                     num_workers=num_workers, 
+                     batch_size=batch_size, 
+                     shuffle=shuffle, 
+                     drop_last=drop_last)
 
 
-def load_kitti_data(dataset_path, num_workers=0, batch_size=32, **kwargs):
+def load_kitti_data(dataset_path, num_workers=0, batch_size=1, shuffle=False, **kwargs):
+    """
+    Load KITTI data for cross-dataset evaluation
+    
+    Args:
+        dataset_path: path to KITTI dataset folder
+        num_workers: number of data loading workers
+        batch_size: batch size (use 1 for visualization)
+        shuffle: whether to shuffle the data
+        **kwargs: additional arguments passed to DenseKITTIDataset (like transform)
+    """
     dataset = DenseKITTIDataset(dataset_path, **kwargs)
-    return DataLoader(dataset, num_workers=num_workers, batch_size=batch_size, shuffle=True, drop_last=True)
+    return DataLoader(dataset, 
+                     num_workers=num_workers, 
+                     batch_size=batch_size, 
+                     shuffle=shuffle)
 
 
 def _one_hot(x, n):
@@ -277,3 +440,60 @@ class DepthError(object):
         # sq_rel = np.mean(((self.gt - self.pred) ** 2) / self.gt)
 
         return abs_rel, a1, a2, a3
+
+
+def load_class_weights(weight_file='classweight.cls'):
+    """
+    Load class weights for semantic segmentation from the provided file
+    
+    The file format is expected to have one weight per line, optionally with labels:
+    ID class: weight
+    0 road: 3.29
+    1 sidewalk: 21.9
+    ...
+    
+    Args:
+        weight_file: path to the classweight.cls file
+    
+    Returns:
+        torch.Tensor of shape (19,) containing class weights
+    """
+    weights = []
+    try:
+        with open(weight_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and header
+                if not line or line.startswith('ID'):
+                    continue
+                
+                # Extract the weight (last part after colon or last word)
+                if ':' in line:
+                    weight = float(line.split(':')[-1].strip())
+                else:
+                    # Try to parse the last token as float
+                    parts = line.split()
+                    if parts:
+                        weight = float(parts[-1])
+                    else:
+                        continue
+                weights.append(weight)
+        
+        # Verify we have 19 weights
+        if len(weights) != 19:
+            print(f"⚠️  Warning: Expected 19 weights, got {len(weights)}")
+            # Pad or truncate if necessary? Better to raise error
+            if len(weights) < 19:
+                raise ValueError(f"Only {len(weights)} weights found in {weight_file}")
+            else:
+                weights = weights[:19]
+        
+        print(f"✅ Loaded {len(weights)} class weights from {weight_file}")
+        return torch.tensor(weights, dtype=torch.float32)
+        
+    except FileNotFoundError:
+        print(f"❌ Weight file {weight_file} not found!")
+        raise
+    except Exception as e:
+        print(f"❌ Error loading weights: {e}")
+        raise

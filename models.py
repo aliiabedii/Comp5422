@@ -53,7 +53,7 @@ class CNNClassifier(torch.nn.Module):
     
 
 class FCN_ST(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=19):
         super().__init__()
         """
         Your code here.
@@ -63,45 +63,290 @@ class FCN_ST(torch.nn.Module):
         Hint: Use residual connections
         Hint: Always pad by kernel_size / 2, use an odd kernel_size
         """
-        raise NotImplementedError('FCN_ST.__init__')
+        # 1. Load pretrained ResNet50 backbone
+        resnet50 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet50', pretrained=True)
+        
+        # 2. Extract encoder layers
+        self.encoder1 = nn.Sequential(
+            resnet50.conv1,
+            resnet50.bn1,
+            resnet50.relu
+        )  # Output: 64 channels, H/2, W/2
+        
+        self.encoder2 = nn.Sequential(
+            resnet50.maxpool,
+            resnet50.layer1
+        )  # Output: 256 channels, H/4, W/4
+        
+        self.encoder3 = resnet50.layer2  # Output: 512 channels, H/8, W/8
+        self.encoder4 = resnet50.layer3  # Output: 1024 channels, H/16, W/16
+        self.encoder5 = resnet50.layer4  # Output: 2048 channels, H/32, W/32
+        
+        # 3. Decoder with up-convolutions and skip connections
+        self.decoder5 = nn.Sequential(
+            nn.ConvTranspose2d(2048, 1024, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.decoder4 = nn.Sequential(
+            nn.ConvTranspose2d(1024 + 1024, 512, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.decoder3 = nn.Sequential(
+            nn.ConvTranspose2d(512 + 512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.decoder2 = nn.Sequential(
+            nn.ConvTranspose2d(256 + 256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.decoder1 = nn.Sequential(
+            nn.ConvTranspose2d(128 + 64, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 4. Final classifier
+        self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
 
     def forward(self, x):
         """
-        Your code here
-        @x: torch.Tensor((B,3,H,W))
-        @return: torch.Tensor((B,C,H,W)), C is the number of classes for segmentation.
-        Hint: Input and output resolutions need to match, use output_padding in up-convolutions, crop the output
-              if required (use z = z[:, :, :H, :W], where H and W are the height and width of a corresponding CNNClassifier
-              convolution
+        Forward pass for single-task semantic segmentation
         """
-        raise NotImplementedError('FCN_ST.forward')
+        B, C, H, W = x.shape
+        
+        # Encoder
+        e1 = self.encoder1(x)      # (B, 64, H/2, W/2)
+        e2 = self.encoder2(e1)      # (B, 256, H/4, W/4)
+        e3 = self.encoder3(e2)      # (B, 512, H/8, W/8)
+        e4 = self.encoder4(e3)      # (B, 1024, H/16, W/16)
+        e5 = self.encoder5(e4)      # (B, 2048, H/32, W/32)
+        
+        # Decoder with skip connections
+        d5 = self.decoder5(e5)               # (B, 1024, H/16, W/16)
+        d5 = torch.cat([d5, e4], dim=1)       # (B, 2048, H/16, W/16)
+        
+        d4 = self.decoder4(d5)                # (B, 512, H/8, W/8)
+        d4 = torch.cat([d4, e3], dim=1)       # (B, 1024, H/8, W/8)
+        
+        d3 = self.decoder3(d4)                # (B, 256, H/4, W/4)
+        d3 = torch.cat([d3, e2], dim=1)       # (B, 512, H/4, W/4)
+        
+        d2 = self.decoder2(d3)                # (B, 128, H/2, W/2)
+        d2 = torch.cat([d2, e1], dim=1)       # (B, 192, H/2, W/2)
+        
+        d1 = self.decoder1(d2)                # (B, 64, H, W)
+        
+        # Final classification
+        out = self.classifier(d1)              # (B, num_classes, H, W)
+        
+        # Crop if needed
+        if out.shape[2] != H or out.shape[3] != W:
+            out = out[:, :, :H, :W]
+        
+        return out
 
 
 class FCN_MT(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=19):
         super().__init__()
         """
-        Your code here.
-        Hint: The Multi-Task FCN needs to output both segmentation and depth maps at a higher resolution
-        Hint: Use up-convolutions
-        Hint: Use skip connections
-        Hint: Use residual connections
-        Hint: Always pad by kernel_size / 2, use an odd kernel_size
+        Multi-Task FCN for both semantic segmentation and depth estimation
+        Shares encoder backbone, but has two separate decoder heads:
+        1. Segmentation head (same as FCN_ST)
+        2. Depth prediction head (outputs 1 channel depth map)
         """
-        raise NotImplementedError('FCN_MT.__init__')
+        
+        # 1. Load pretrained ResNet50 backbone (shared encoder)
+        resnet50 = torch.hub.load('pytorch/vision:v0.10.0', 'resnet50', pretrained=True)
+        
+        # === SHARED ENCODER (same as FCN_ST) ===
+        # Encoder 1: initial conv + bn + relu (stride 2)
+        self.encoder1 = nn.Sequential(
+            resnet50.conv1,
+            resnet50.bn1,
+            resnet50.relu
+        )  # Output: 64 channels, H/2, W/2
+        
+        # Encoder 2: maxpool + layer1 (stride 2 total)
+        self.encoder2 = nn.Sequential(
+            resnet50.maxpool,
+            resnet50.layer1
+        )  # Output: 256 channels, H/4, W/4
+        
+        # Encoder 3: layer2 (stride 2)
+        self.encoder3 = resnet50.layer2  # Output: 512 channels, H/8, W/8
+        
+        # Encoder 4: layer3 (stride 2)
+        self.encoder4 = resnet50.layer3  # Output: 1024 channels, H/16, W/16
+        
+        # Encoder 5: layer4 (stride 2)
+        self.encoder5 = resnet50.layer4  # Output: 2048 channels, H/32, W/32
+        
+        # === SEGMENTATION HEAD (same as FCN_ST) ===
+        # Decoder 5: upsample from 2048 → 1024
+        self.seg_decoder5 = nn.Sequential(
+            nn.ConvTranspose2d(2048, 1024, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Decoder 4: combine with encoder4 (1024) → 512
+        self.seg_decoder4 = nn.Sequential(
+            nn.ConvTranspose2d(1024 + 1024, 512, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Decoder 3: combine with encoder3 (512) → 256
+        self.seg_decoder3 = nn.Sequential(
+            nn.ConvTranspose2d(512 + 512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Decoder 2: combine with encoder2 (256) → 128
+        self.seg_decoder2 = nn.Sequential(
+            nn.ConvTranspose2d(256 + 256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Decoder 1: combine with encoder1 (64) → 64
+        self.seg_decoder1 = nn.Sequential(
+            nn.ConvTranspose2d(128 + 64, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Final segmentation classifier (19 classes)
+        self.seg_classifier = nn.Conv2d(64, num_classes, kernel_size=1)
+        
+        # === DEPTH PREDICTION HEAD (separate decoder) ===
+        # Depth decoder also starts from encoder5 (same shared features)
+        self.depth_decoder5 = nn.Sequential(
+            nn.ConvTranspose2d(2048, 1024, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.depth_decoder4 = nn.Sequential(
+            nn.ConvTranspose2d(1024 + 1024, 512, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.depth_decoder3 = nn.Sequential(
+            nn.ConvTranspose2d(512 + 512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.depth_decoder2 = nn.Sequential(
+            nn.ConvTranspose2d(256 + 256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.depth_decoder1 = nn.Sequential(
+            nn.ConvTranspose2d(128 + 64, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Final depth prediction (1 channel for depth values)
+        # Using Tanh to constrain output range (helps with training stability)
+        self.depth_head = nn.Sequential(
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Tanh()  # Outputs between -1 and 1, will scale later
+        )
+        
+        # Depth scaling factor (to map Tanh output to real depth range)
+        self.depth_scale = 50.0  # Max depth ~50 meters
+        
+        # Store input size for cropping
+        self.input_size = None
 
     def forward(self, x):
         """
-        Your code here
-        @x: torch.Tensor((B,3,H,W))
-        @return: torch.Tensor((B,C,H,W)), C is the number of classes for segmentation
-        @return: torch.Tensor((B,1,H,W)), 1 is one channel for depth estimation
-        Hint: Apply input normalization inside the network, to make sure it is applied in the grader
-        Hint: Input and output resolutions need to match, use output_padding in up-convolutions, crop the output
-              if required (use z = z[:, :, :H, :W], where H and W are the height and width of a corresponding strided
-              convolution
+        Forward pass for multi-task learning
+        
+        Args:
+            x: (B, 3, H, W) input image
+        
+        Returns:
+            seg_out: (B, num_classes, H, W) segmentation logits
+            depth_out: (B, 1, H, W) depth map (in meters)
         """
-        raise NotImplementedError('FCN_MT.forward')
+        B, C, H, W = x.shape
+        
+        # === SHARED ENCODER ===
+        e1 = self.encoder1(x)      # (B, 64, H/2, W/2)
+        e2 = self.encoder2(e1)      # (B, 256, H/4, W/4)
+        e3 = self.encoder3(e2)      # (B, 512, H/8, W/8)
+        e4 = self.encoder4(e3)      # (B, 1024, H/16, W/16)
+        e5 = self.encoder5(e4)      # (B, 2048, H/32, W/32)
+        
+        # === SEGMENTATION HEAD ===
+        # Decoder with skip connections
+        s5 = self.seg_decoder5(e5)               # (B, 1024, H/16, W/16)
+        s5 = torch.cat([s5, e4], dim=1)           # (B, 2048, H/16, W/16)
+        
+        s4 = self.seg_decoder4(s5)                # (B, 512, H/8, W/8)
+        s4 = torch.cat([s4, e3], dim=1)           # (B, 1024, H/8, W/8)
+        
+        s3 = self.seg_decoder3(s4)                # (B, 256, H/4, W/4)
+        s3 = torch.cat([s3, e2], dim=1)           # (B, 512, H/4, W/4)
+        
+        s2 = self.seg_decoder2(s3)                # (B, 128, H/2, W/2)
+        s2 = torch.cat([s2, e1], dim=1)           # (B, 192, H/2, W/2)
+        
+        s1 = self.seg_decoder1(s2)                # (B, 64, H, W)
+        
+        # Final segmentation classification
+        seg_out = self.seg_classifier(s1)          # (B, num_classes, H, W)
+        
+        # === DEPTH HEAD ===
+        # Separate decoder (still using shared encoder features)
+        d5 = self.depth_decoder5(e5)               # (B, 1024, H/16, W/16)
+        d5 = torch.cat([d5, e4], dim=1)             # (B, 2048, H/16, W/16)
+        
+        d4 = self.depth_decoder4(d5)                # (B, 512, H/8, W/8)
+        d4 = torch.cat([d4, e3], dim=1)             # (B, 1024, H/8, W/8)
+        
+        d3 = self.depth_decoder3(d4)                # (B, 256, H/4, W/4)
+        d3 = torch.cat([d3, e2], dim=1)             # (B, 512, H/4, W/4)
+        
+        d2 = self.depth_decoder2(d3)                # (B, 128, H/2, W/2)
+        d2 = torch.cat([d2, e1], dim=1)             # (B, 192, H/2, W/2)
+        
+        d1 = self.depth_decoder1(d2)                # (B, 64, H, W)
+        
+        # Final depth prediction
+        depth_out = self.depth_head(d1)              # (B, 1, H, W) in [-1, 1]
+        
+        # Scale to actual depth range (e.g., 0-50 meters)
+        depth_out = (depth_out + 1) / 2 * self.depth_scale  # Map [-1,1] to [0, depth_scale]
+        
+        # Crop if output is larger than input
+        if seg_out.shape[2] != H or seg_out.shape[3] != W:
+            seg_out = seg_out[:, :, :H, :W]
+            depth_out = depth_out[:, :, :H, :W]
+        
+        return seg_out, depth_out
+        
+        
+        
+        
+        
+        
 
 
 class SoftmaxCrossEntropyLoss(nn.Module):

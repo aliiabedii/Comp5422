@@ -47,6 +47,31 @@ class RandomHorizontalFlip(object):
             image = F.hflip(image)
             target = F.hflip(target)
         return image, target
+class RandomHorizontalFlip3(object):
+    def __init__(self, flip_prob=0.5):
+        self.flip_prob = flip_prob
+
+    def __call__(self, image, target, target2):
+        if random.random() < self.flip_prob:
+            # Image is PIL Image
+            image = F.hflip(image)
+            
+            # Target (semantic) - could be PIL or numpy
+            if isinstance(target, Image.Image):
+                target = F.hflip(target)
+            else:
+                # Assume numpy array
+                target = np.fliplr(target).copy()
+            
+            # Target2 (depth) - could be PIL or numpy
+            if isinstance(target2, Image.Image):
+                target2 = F.hflip(target2)
+            else:
+                # Assume numpy array
+                target2 = np.fliplr(target2).copy()
+                
+        return image, target, target2  
+
 
 
 class Normalize(T.Normalize):
@@ -65,14 +90,17 @@ class ColorJitter(T.ColorJitter):
 
 class ColorJitter3(T.ColorJitter):
     def __call__(self, image, target, target2):
-        return super().__call__(image), target, target2
+        # ColorJitter only affects the image
+        image = super().__call__(image)
+        # target and target2 remain unchanged (numpy or PIL)
+        return image, target, target2
 
 
 def label_to_tensor(lbl):
     """
     Reads a PIL pallet Image img and convert the indices to a pytorch tensor
     """
-    return torch.as_tensor(np.array(lbl, np.int64, copy=False)) 
+    return torch.as_tensor(np.asarray(lbl, dtype=np.int64)) 
 
 
 def label_to_pil_image(lbl):
@@ -97,3 +125,36 @@ def label_to_pil_image(lbl):
 class ToTensor(object):
     def __call__(self, image, label):
         return F.to_tensor(image), label_to_tensor(label)
+
+
+class ToTensor3(object):
+    """
+    Convert image, semantic mask, and depth map to tensors
+    """
+    def __call__(self, image, label, depth):
+        # Convert image to tensor
+        image_tensor = F.to_tensor(image)
+        
+        # Convert label to tensor (handle both numpy arrays and PIL Images)
+        if isinstance(label, np.ndarray):
+            label_tensor = torch.from_numpy(label).long()
+        elif isinstance(label, Image.Image):
+            # If it's PIL Image, convert to numpy preserving exact values then to tensor
+            # mode 'L' images preserve byte values exactly
+            label_np = np.array(label, dtype=np.int64)
+            label_tensor = torch.from_numpy(label_np).long()
+        else:
+            label_tensor = torch.as_tensor(label, dtype=torch.int64).long()
+        
+        # Convert depth to tensor (handle both numpy arrays and PIL Images)
+        if isinstance(depth, np.ndarray):
+            depth_tensor = torch.from_numpy(depth).float()
+        elif isinstance(depth, Image.Image):
+            # If it's PIL Image, convert to numpy then to tensor
+            # mode 'L' images are uint8, convert to float
+            depth_np = np.array(depth, dtype=np.float32)
+            depth_tensor = torch.from_numpy(depth_np).float()
+        else:
+            depth_tensor = torch.as_tensor(depth, dtype=torch.float32).float()
+        
+        return image_tensor, label_tensor, depth_tensor

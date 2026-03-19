@@ -1,16 +1,13 @@
-from .models import CNNClassifier, save_model, SoftmaxCrossEntropyLoss
-from .utils import ConfusionMatrix, load_data, VehicleClassificationDataset
+from .models import CNNClassifier
+from .utils import ConfusionMatrix, load_data
 import torch
 import torchvision
 import torch.utils.tensorboard as tb
-import torch.nn as nn
-import torch.optim as optim
 from torchvision import transforms
-from torch.utils.data import DataLoader
 import os
 
 
-def train(args):
+def test(args):
     from os import path
     
     # ============================================
@@ -20,184 +17,138 @@ def train(args):
     print(f"Using device: {device}")
     
     # ============================================
-    # 2. Initialize Model
+    # 2. Load Model (EVALUATION ONLY - NO TRAINING)
     # ============================================
     model = CNNClassifier(num_classes=6)
+    
+    # Try both possible extensions
+    checkpoint_path = None
+    for fname in ['cnn.th', 'cnn.pth']:
+        if os.path.exists(fname):
+            checkpoint_path = fname
+            print(f"✅ Found checkpoint: {fname}")
+            break
+    
+    if checkpoint_path is None:
+        print("❌ No checkpoint found! Please train the model first.")
+        return 0.0
+    
+    # Load the saved weights
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model = model.to(device)
+    model.eval()  # IMPORTANT: Set to evaluation mode
+    print(f"✅ Model loaded from {checkpoint_path}")
     
     # ============================================
-    # 3. Setup TensorBoard Logging (Section 3.3)
+    # 3. Setup Data Transforms (NO AUGMENTATION)
     # ============================================
-    train_logger, valid_logger = None, None
-    if args.log_dir is not None:
-        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'), flush_secs=1)
-        valid_logger = tb.SummaryWriter(path.join(args.log_dir, 'valid'), flush_secs=1)
-        print(f"Logging to: {args.log_dir}")
-    
-    # ============================================
-    # 4. Setup Data Loaders
-    # ============================================
-    # Training transforms with augmentation
-    train_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-        transforms.RandomCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                             std=[0.229, 0.224, 0.225]),
-    ])
-    
-    # Validation transforms (no augmentation)
-    val_transform = transforms.Compose([
+    transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                             std=[0.229, 0.224, 0.225]),
+                           std=[0.229, 0.224, 0.225])
     ])
     
-    # Load datasets
-    train_dataset = VehicleClassificationDataset(args.train_dir, transform=train_transform)
-    val_dataset = VehicleClassificationDataset(args.val_dir, transform=val_transform)
+    # ============================================
+    # 4. Load Data
+    # ============================================
+    print("\n--- Loading Datasets ---")
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-                              shuffle=True, num_workers=0, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, 
-                            shuffle=False, num_workers=0, drop_last=False)
+    train_loader = load_data(args.train_dir, 
+                            batch_size=args.batch_size, 
+                            num_workers=4,
+                            transform=transform)
     
-    print(f"Training samples: {len(train_dataset)}")
-    print(f"Validation samples: {len(val_dataset)}")
+    val_loader = load_data(args.val_dir,
+                          batch_size=args.batch_size,
+                          num_workers=4,
+                          transform=transform)
+    
+    print(f"Training samples: {len(train_loader.dataset)}")
+    print(f"Validation samples: {len(val_loader.dataset)}")
     
     # ============================================
-    # 5. Setup Loss, Optimizer, and Scheduler
+    # 5. Evaluation Function (NO GRADIENTS)
     # ============================================
-    criterion = SoftmaxCrossEntropyLoss()
-    
-    optimizer = optim.Adam(model.parameters(), 
-                           lr=args.lr,
-                           weight_decay=args.weight_decay)
-    
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
-    
-    # ============================================
-    # 6. Training Loop (Section 3.4)
-    # ============================================
-    num_epochs = args.num_epochs
-    global_step = 0
-    best_val_acc = 0.0
-    patience = 5
-    patience_counter = 0
-    
-    for epoch in range(num_epochs):
-        print(f"\n{'='*50}")
-        print(f"Epoch {epoch+1}/{num_epochs}")
-        print(f"{'='*50}")
+    def evaluate(loader, name):
+        confusion = ConfusionMatrix(size=6)
+        correct = 0
+        total = 0
         
-        # --- Training Phase ---
-        model.train()
-        
-        # ✅ CRITICAL: Initialize these variables BEFORE the loop
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
-        
-        for batch_idx, (images, labels) in enumerate(train_loader):
-            images = images.to(device)
-            labels = labels.to(device)
-            
-            # Forward pass
-            optimizer.zero_grad()
-            logits = model(images)
-            loss = criterion(logits, labels)
-            
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-            
-            # ✅ Accumulate statistics
-            train_loss += loss.item() * images.size(0)
-            _, predicted = torch.max(logits, 1)
-            train_correct += (predicted == labels).sum().item()
-            train_total += labels.size(0)
-            
-            # Log training loss at every iteration (Section 3.3)
-            if train_logger is not None:
-                train_logger.add_scalar('train/loss', loss.item(), global_step)
-            
-            global_step += 1
-        
-        # Calculate training accuracy
-        train_loss = train_loss / train_total
-        train_acc = train_correct / train_total
-        
-        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-        
-        # Log training accuracy at each epoch
-        if train_logger is not None:
-            train_logger.add_scalar('train/accuracy', train_acc, epoch)
-        
-        # --- Validation Phase ---
-        model.eval()
-        
-        # ✅ CRITICAL: Initialize these variables BEFORE validation loop
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-        
-        with torch.no_grad():
-            for images, labels in val_loader:
+        with torch.no_grad():  # IMPORTANT: No gradients needed for evaluation
+            for i, (images, labels) in enumerate(loader):
                 images = images.to(device)
                 labels = labels.to(device)
                 
+                # Forward pass only
                 logits = model(images)
-                loss = criterion(logits, labels)
+                preds = logits.argmax(1)
                 
-                val_loss += loss.item() * images.size(0)
-                _, predicted = torch.max(logits, 1)
-                val_correct += (predicted == labels).sum().item()
-                val_total += labels.size(0)
+                # Update metrics
+                confusion.add(preds, labels)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+                
+                if (i+1) % 10 == 0:
+                    print(f"  Processed {i+1}/{len(loader)} batches...")
         
-        # Calculate validation accuracy
-        val_loss = val_loss / val_total
-        val_acc = val_correct / val_total
+        # Calculate metrics
+        accuracy = correct / total
+        class_acc = confusion.class_accuracy
+        iou = confusion.iou
         
-        print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
+        print(f"\n📊 {name} Set Results:")
+        print(f"  Global Accuracy: {accuracy:.4f}")
+        print(f"  Mean IoU: {iou:.4f}")
         
-        # Log validation accuracy at each epoch
-        if valid_logger is not None:
-            valid_logger.add_scalar('valid/accuracy', val_acc, epoch)
-            valid_logger.add_scalar('valid/loss', val_loss, epoch)
-        
-        # Learning rate scheduler step
-        scheduler.step()
-        
-        # --- Save Best Model ---
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            save_model(model)  # Saves as cnn.pth
-            print(f"✅ Model saved! Best Val Acc: {best_val_acc:.4f}")
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            print(f"Patience: {patience_counter}/{patience}")
-        
-        # --- Early Stopping ---
-        if patience_counter >= patience:
-            print(f"⚠️  Early stopping at epoch {epoch+1}")
-            break
+        return accuracy, iou
     
-    print(f"\n{'='*50}")
-    print(f"Training Complete!")
-    print(f"Best Validation Accuracy: {best_val_acc:.4f}")
-    print(f"{'='*50}")
+    # ============================================
+    # 6. Run Evaluation
+    # ============================================
+    print("\n" + "="*50)
+    print("Evaluating on Training Set...")
+    print("="*50)
+    train_acc, train_iou = evaluate(train_loader, "Training")
     
-    # Close TensorBoard writers
-    if train_logger is not None:
-        train_logger.close()
-    if valid_logger is not None:
-        valid_logger.close()
+    print("\n" + "="*50)
+    print("Evaluating on Validation Set...")
+    print("="*50)
+    val_acc, val_iou = evaluate(val_loader, "Validation")
+    
+    # ============================================
+    # 7. Print Summary Table (Table 1 format)
+    # ============================================
+    print("\n" + "="*50)
+    print("TABLE 1: Classification Performance")
+    print("="*50)
+    print(f"{'Dataset':<15} {'Accuracy':<15}")
+    print("-"*30)
+    print(f"{'Training':<15} {train_acc:<15.4f}")
+    print(f"{'Validation':<15} {val_acc:<15.4f}")
+    print("="*50)
+    
+    # ============================================
+    # 8. Save results to file
+    # ============================================
+    results_path = 'cls_results.txt'
+    with open(results_path, 'w') as f:
+        f.write("Table 1: Classification Performance on VehicleClassification Dataset\n")
+        f.write("="*50 + "\n")
+        f.write(f"{'Dataset':<15} {'Accuracy':<15}\n")
+        f.write("-"*30 + "\n")
+        f.write(f"{'Training':<15} {train_acc:<15.4f}\n")
+        f.write(f"{'Validation':<15} {val_acc:<15.4f}\n")
+        f.write("="*50 + "\n")
+        f.write(f"\nModel: {checkpoint_path}\n")
+        f.write(f"Model download link: [INSERT YOUR LINK HERE]\n")
+    
+    print(f"\n✅ Results saved to {results_path}")
+    print("\nDon't forget to:")
+    print("1. Add your TensorBoard training curves to cls_results.pdf")
+    print("2. Upload your model and add download link")
+    
+    return val_acc
 
 
 if __name__ == '__main__':
@@ -206,8 +157,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     
     # Required arguments
-    parser.add_argument('--log_dir', type=str, default='logs/cnn', 
-                        help='Directory for TensorBoard logs')
     parser.add_argument('--train_dir', type=str, 
                         default=r'C:\Users\Lenovo\Desktop\computer Vision - COMP 5422\HW1_Dataset\train_subset',
                         help='Path to training dataset')
@@ -215,11 +164,14 @@ if __name__ == '__main__':
                         default=r'C:\Users\Lenovo\Desktop\computer Vision - COMP 5422\HW1_Dataset\validation_subset',
                         help='Path to validation dataset')
     
-    # Hyperparameters
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-5, help='L2 regularization')
-    parser.add_argument('--num_epochs', type=int, default=30, help='Number of epochs')
-    
+    # Optional arguments
+    parser.add_argument('--log_dir', type=str, default='logs/eval',
+                        help='Directory for logs (optional)')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Batch size for evaluation')
+
     args = parser.parse_args()
-    train(args)
+    
+    # Run evaluation
+    accuracy = test(args)
+    print(f"\nFinal Validation Accuracy: {accuracy:.4f}")
