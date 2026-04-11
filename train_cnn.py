@@ -87,7 +87,7 @@ def train(args):
     num_epochs = args.num_epochs
     global_step = 0
     best_val_acc = 0.0
-    patience = 7
+    patience = 15
     patience_counter = 0
     
     for epoch in range(num_epochs):

@@ -37,7 +37,6 @@ class VehicleClassificationDataset(Dataset):
                 
                 # Get all image files in the folder
                 image_paths = glob(os.path.join(class_folder, '*.jpg'))
-                image_paths += glob(os.path.join(class_folder, '*.JPG'))
                 
                 # Add each image path with its label
                 for img_path in image_paths:

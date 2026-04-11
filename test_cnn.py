@@ -148,7 +148,7 @@ def test(args):
     print("1. Add your TensorBoard training curves to cls_results.pdf")
     print("2. Upload your model and add download link")
     
-    return val_acc, val_confusion
+    return val_acc,train_confusion, val_confusion
 
 
 if __name__ == '__main__':
